@@ -29,7 +29,7 @@ def transcribe_audio(audio_file_path):
 
 
 # Specify the audio file path
-audio_file_path = r"C:\lang\audio recordings\015-Irrigation.mp3"
+audio_file_path = r"C:\lang\audio recordings\harvard.wav"
 
 # Time the entire transcription process
 start_time = time.time()
