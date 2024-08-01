@@ -1,10 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_sound/flutter_sound.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:path_provider/path_provider.dart';
-import 'dart:io';
 import 'dart:convert';
-import 'dart:typed_data';
+import 'dart:async';
+import 'dart:io';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:record/record.dart';
 
@@ -22,6 +20,7 @@ class _Course1ScreenState extends State<Course1Screen> {
   late Record _recorder;
   String transcription = '';
   late WebSocketChannel _channel;
+  Timer? _timer;
 
   @override
   void initState() {
@@ -57,42 +56,45 @@ class _Course1ScreenState extends State<Course1Screen> {
         samplingRate: 16000,
         numChannels: 1,
       );
-      setState(() {
-        isRecording = true;
-      });
 
-      // Start sending audio data to the server
-      _sendAudioData();
+      _streamAudioData();
     }
   }
 
-  Future<void> _sendAudioData() async {
-    while (isRecording) {
-      final path = await _recorder.stop();
-      if (path != null) {
-        final file = File(path);
-        final bytes = await file.readAsBytes();
-        final base64Audio = base64Encode(bytes);
-        _channel.sink.add(jsonEncode({'audio': base64Audio}));
+  void _streamAudioData() {
+    _timer = Timer.periodic(Duration(milliseconds: 100), (timer) async {
+      if (!isRecording) {
+        timer.cancel();
+        return;
       }
-      await _recorder.start(
-        encoder: AudioEncoder.pcm16bit,
-        samplingRate: 16000,
-        numChannels: 1,
-      );
-      await Future.delayed(Duration(milliseconds: 100)); // Adjust as needed
-    }
+
+      try {
+        final path = await _recorder.stop();
+        if (path != null) {
+          final bytes = await File(path).readAsBytes();
+          final base64Audio = base64Encode(bytes);
+          _channel.sink.add(jsonEncode({'audio': base64Audio}));
+        }
+        await _recorder.start(
+          encoder: AudioEncoder.pcm16bit,
+          samplingRate: 16000,
+          numChannels: 1,
+        );
+      } catch (e) {
+        print('Error streaming audio: $e');
+      }
+    });
   }
 
   Future<void> _stopRecording() async {
+    _timer?.cancel();
     await _recorder.stop();
-    setState(() {
-      isRecording = false;
-    });
+    _channel.sink.add(jsonEncode({'audio': 'END'}));
   }
 
   @override
   void dispose() {
+    _timer?.cancel();
     _recorder.dispose();
     _channel.sink.close();
     super.dispose();
@@ -131,6 +133,9 @@ class _Course1ScreenState extends State<Course1Screen> {
                 child: RecordButton(
                   isRecording: isRecording,
                   onTap: () {
+                    setState(() {
+                      isRecording = !isRecording;
+                    });
                     if (isRecording) {
                       _stopRecording();
                     } else {
@@ -143,15 +148,7 @@ class _Course1ScreenState extends State<Course1Screen> {
             Expanded(
               child: Padding(
                 padding: const EdgeInsets.all(16.0),
-                child: Text(
-                  transcription,
-                  style: TextStyle(
-                    fontFamily: 'Comfortaa',
-                    fontSize: 18,
-                    color: Color(0xFFC0DEE5),
-                  ),
-                  textAlign: TextAlign.center,
-                ),
+                child: LiveTranscription(transcription: transcription),
               ),
             ),
           ],
@@ -171,8 +168,8 @@ class RecordButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
-      child: MouseRegion(  // Add this MouseRegion widget
-        cursor: SystemMouseCursors.click,  // This line changes the cursor on hover
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
         child: Container(
           width: 120,
           height: 120,
@@ -188,17 +185,39 @@ class RecordButton extends StatelessWidget {
             ],
           ),
           child: Center(
-            child: AnimatedSwitcher(
-              duration: Duration(milliseconds: 200),
-              child: Icon(
-                isRecording ? Icons.stop : Icons.mic,
-                key: ValueKey<bool>(isRecording),
-                color: Colors.white,
-                size: 60,
-              ),
+            child: Icon(
+              isRecording ? Icons.stop : Icons.mic,
+              color: Colors.white,
+              size: 60,
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class LiveTranscription extends StatelessWidget {
+  final String transcription;
+
+  LiveTranscription({required this.transcription});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Color(0xFF07575B),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Text(
+        transcription.isEmpty ? 'Start speaking...' : transcription,
+        style: TextStyle(
+          fontFamily: 'Comfortaa',
+          fontSize: 18,
+          color: Color(0xFFC0DEE5),
+        ),
+        textAlign: TextAlign.center,
       ),
     );
   }
