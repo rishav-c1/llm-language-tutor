@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, RefreshCw, FileText, X, Mic } from 'lucide-react';
+import { Send, RefreshCw, FileText, X, Mic, Speech } from 'lucide-react';
 
 const App = () => {
   const [messages, setMessages] = useState(() => {
@@ -10,8 +10,10 @@ const App = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [feedback, setFeedback] = useState(null);
   const [showFeedback, setShowFeedback] = useState(false);
+  const [audioSrc, setAudioSrc] = useState(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
+  const audioRef = useRef(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -58,6 +60,7 @@ const App = () => {
       const data = await response.json();
       const assistantMessage = { role: 'assistant', content: data.response };
       setMessages(prev => isNewChat ? [assistantMessage] : [...prev, assistantMessage]);
+      setAudioSrc(`data:audio/mp3;base64,${data.audio}`);
     } catch (error) {
       console.error('Error:', error);
       setMessages(prev => [...prev, { role: 'error', content: `Failed to get response. Error: ${error.message}` }]);
@@ -129,6 +132,12 @@ const App = () => {
     });
   };
 
+  const playAudio = () => {
+    if (audioRef.current) {
+      audioRef.current.play();
+    }
+  };
+
 
 
   return (
@@ -151,7 +160,7 @@ const App = () => {
             {showFeedback && feedback && (
               <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
                 <div className="bg-[#07575b] rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto">
-                  <div className="flex justify-between items-center p-4 border-b border-[#003b46]">
+                  <div className="flex bg-[#003b46] justify-between items-center p-4 border-b border-[#003b46]">
                     <h3 className="font-bold bg-[#003b46] text-xl">Progress Summary</h3>
                     <button
                       onClick={() => setShowFeedback(false)}
@@ -222,7 +231,15 @@ const App = () => {
         >
           <FileText size={20} className="mr-2" /> Get Summary
         </button>
+        <button
+          onClick={playAudio}
+          className="flex items-center justify-center bg-[#07575b] text-[#c0dee5] p-2 rounded-lg transition-colors duration-200 hover:bg-[#07575b] focus:outline-none focus:ring-2 focus:ring-[#07575b]"
+          disabled={!audioSrc}
+        >
+          <Speech size={20} className="mr-2" /> Speak
+        </button>
       </footer>
+      <audio ref={audioRef} src={audioSrc} />
     </div>
   );
 };
