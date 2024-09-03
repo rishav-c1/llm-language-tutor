@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, RefreshCw, FileText, X, Mic, Speech } from 'lucide-react';
 
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost';
+
 const App = () => {
   const [messages, setMessages] = useState(() => {
     const saved = localStorage.getItem('chatMessages');
@@ -11,17 +13,19 @@ const App = () => {
   const [feedback, setFeedback] = useState(null);
   const [showFeedback, setShowFeedback] = useState(false);
   const [audioSrc, setAudioSrc] = useState(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [audioChunks, setAudioChunks] = useState([]);
+  const [recordingStatus, setRecordingStatus] = useState('');
+  const [error, setError] = useState(null);
+  const mediaRecorderRef = useRef(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const audioRef = useRef(null);
-
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
-
-  useEffect(scrollToBottom, [messages]);
+  const streamRef = useRef(null);
 
   useEffect(() => {
+    scrollToBottom();
     localStorage.setItem('chatMessages', JSON.stringify(messages));
   }, [messages]);
 
@@ -31,9 +35,13 @@ const App = () => {
     }
   }, []);
 
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
   const handleSubmit = async (e, isNewChat = false) => {
     if (e) e.preventDefault();
-    if (!isNewChat && !input.trim()) return;
+    if (!isNewChat && (!input || typeof input !== 'string' || input.trim() === '')) return;
 
     const userMessage = isNewChat ? null : { role: 'user', content: input };
     if (!isNewChat) {
@@ -43,7 +51,7 @@ const App = () => {
     setIsLoading(true);
 
     try {
-      const response = await fetch('/learn', {
+      const response = await fetch(`${API_URL}/api/learn`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -90,7 +98,7 @@ const App = () => {
   const getFeedback = async () => {
     setIsLoading(true);
     try {
-      const response = await fetch('/feedback', {
+      const response = await fetch(`${API_URL}/api/feedback`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -104,7 +112,7 @@ const App = () => {
 
       const data = await response.json();
       setFeedback(data.feedback);
-      setShowFeedback(true);  // Show the feedback pop-up when we get the feedback
+      setShowFeedback(true);
     } catch (error) {
       console.error('Error:', error);
       setFeedback(`Failed to get feedback. Error: ${error.message}`);
@@ -118,9 +126,13 @@ const App = () => {
 
     const parts = feedbackString.split(/(?=\d+\.\s)/);
     return parts.map((part, index) => {
-      const [number, ...content] = part.split(/(?<=^\d+\.)\s/);
+      const [number, ...content] = part.trim().split(/(?<=^\d+\.)\s/);
       const formattedContent = content.join(' ').split('-').map((item, i) =>
-        i === 0 ? item : <React.Fragment key={i}><br />• {item.trim()}</React.Fragment>
+        i === 0 ? item.trim() : (
+          <React.Fragment key={i}>
+            <br />• {item.trim()}
+          </React.Fragment>
+        )
       );
 
       return (
@@ -132,21 +144,126 @@ const App = () => {
     });
   };
 
-  const playAudio = () => {
-    if (audioRef.current) {
-      audioRef.current.play();
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+
+      setAudioChunks([]);
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          setAudioChunks((chunks) => [...chunks, event.data]);
+        }
+      };
+
+      mediaRecorder.onstart = () => {
+        setRecordingStatus('Recording...');
+      };
+
+      mediaRecorder.onstop = () => {
+        setRecordingStatus('Processing audio...');
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+      setError(null);
+    } catch (error) {
+      console.error('Error accessing microphone:', error);
+      setError('Failed to access microphone. Please check your permissions.');
     }
   };
 
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+        streamRef.current = null;
+      }
+    }
+  };
+
+  const sendAudioToServer = async () => {
+    if (audioChunks.length === 0) {
+      setError('No audio recorded. Please try again.');
+      setRecordingStatus('');
+      return;
+    }
+
+    const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+    const formData = new FormData();
+    formData.append('audio', audioBlob, 'output.wav');
+
+    try {
+      setIsLoading(true);
+      const response = await fetch(`${API_URL}/api/speech-to-text`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      if (data.transcript) {
+        setInput(data.transcript);
+        setError(null);
+        setRecordingStatus('Transcription complete');
+      } else {
+        throw new Error('No transcription returned from server');
+      }
+    } catch (error) {
+      console.error('Error sending audio to server:', error);
+      setError(`Failed to transcribe audio: ${error.message}`);
+    } finally {
+      setIsLoading(false);
+      setAudioChunks([]);
+      setTimeout(() => setRecordingStatus(''), 3000); // Clear status after 3 seconds
+    }
+  };
+
+  useEffect(() => {
+    if (audioChunks.length > 0 && !isRecording) {
+      sendAudioToServer();
+    }
+  }, [audioChunks, isRecording]);
+
+
+  const toggleAudio = () => {
+    if (audioRef.current) {
+      if (isPlaying) {
+        audioRef.current.pause();
+        audioRef.current.currentTime = 0;
+        setIsPlaying(false);
+      } else {
+        audioRef.current.play();
+        setIsPlaying(true);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.onended = () => {
+        setIsPlaying(false);
+      };
+    }
+  }, [audioSrc]);
 
 
   return (
     <div className="flex flex-col h-screen bg-[#003b46] text-[#c0dee5] font-['Comfortaa']">
       <header className="bg-[#003b46] p-4 text-center">
-        <h1 className="text-2xl font-bold">Learn Español (Spanish) with Lang</h1>
+        <h1 className="text-2xl font-bold">Learn Español with Lang</h1>
       </header>
       <main className="flex-grow flex flex-col p-2 max-w-4xl mx-auto w-full overflow-hidden">
-        <div className="flex-grow mx-2 overflow-auto mb-4 bg-[#07575b] rounded-lg">
+        <div className="flex-grow mx-2 overflow-auto mb-4 bg-[#003b46] rounded-lg">
           <div className="max-h-full overflow-y-auto p-3 bg-[#003b46]">
             {messages.map((message, index) => (
               <div key={index} className={`mb-4 ${message.role === 'user' ? 'text-right' : 'text-left'}`}>
@@ -160,7 +277,7 @@ const App = () => {
             {showFeedback && feedback && (
               <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
                 <div className="bg-[#07575b] rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto">
-                  <div className="flex bg-[#003b46] justify-between items-center p-4 border-b border-[#003b46]">
+                  <div className="flex justify-between items-center p-4 bg-[#003b46]">
                     <h3 className="font-bold bg-[#003b46] text-xl">Progress Summary</h3>
                     <button
                       onClick={() => setShowFeedback(false)}
@@ -183,25 +300,31 @@ const App = () => {
             <input
               ref={inputRef}
               type="text"
-              value={input}
+              value={input || ''}
               onChange={(e) => setInput(e.target.value)}
               placeholder="Type your message here..."
               className="flex-grow bg-[#07575b] text-[#c0dee5] rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-[#07575b]"
-              disabled={isLoading}
+              disabled={isLoading || isRecording}
             />
             <button
               type="button"
-              className="bg-[#07575b] text-[#c0dee5] p-3 rounded-lg transition-colors duration-200 hover:bg-[#07575b] focus:outline-none focus:ring-2 focus:ring-[#07575b]">
+              onClick={isRecording ? stopRecording : startRecording}
+              className={`bg-[#07575b] text-[#c0dee5] p-3 rounded-lg transition-colors duration-200 hover:bg-[#07575b] focus:outline-none focus:ring-2 focus:ring-[#07575b] ${isRecording ? 'animate-pulse' : ''}`}
+              disabled={isLoading}
+            >
               <Mic size={24} />
             </button>
             <button
               type="submit"
               className="bg-[#07575b] text-[#c0dee5] p-3 rounded-lg transition-colors duration-200 hover:bg-[#07575b] focus:outline-none focus:ring-2 focus:ring-[#07575b]"
-              disabled={isLoading}
+              disabled={isLoading || isRecording || input === null || input.trim() === ''}
             >
               <Send size={24} />
             </button>
           </div>
+          {recordingStatus && (
+            <div className="text-center text-[#c0dee5] mt-2">{recordingStatus}</div>
+          )}
           <div className="flex justify-center gap-2 mt-2">
             {['¿', '¡', 'ü', 'ñ', 'é', 'á', 'í', 'ó', 'ú'].map((char) => (
               <button
@@ -214,6 +337,7 @@ const App = () => {
               </button>
             ))}
           </div>
+          {error && <div className="text-red-400 mt-2">{error}</div>}
         </form>
       </main>
       <footer className="bg-[#003b46] p-4 text-center flex justify-center gap-4">
@@ -232,11 +356,11 @@ const App = () => {
           <FileText size={20} className="mr-2" /> Get Summary
         </button>
         <button
-          onClick={playAudio}
+          onClick={toggleAudio}
           className="flex items-center justify-center bg-[#07575b] text-[#c0dee5] p-2 rounded-lg transition-colors duration-200 hover:bg-[#07575b] focus:outline-none focus:ring-2 focus:ring-[#07575b]"
           disabled={!audioSrc}
         >
-          <Speech size={20} className="mr-2" /> Speak
+          <Speech size={20} className="mr-2" /> {isPlaying ? 'Stop Audio' : 'Read Aloud'}
         </button>
       </footer>
       <audio ref={audioRef} src={audioSrc} />
