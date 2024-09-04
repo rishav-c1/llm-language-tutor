@@ -71,9 +71,6 @@ const App = () => {
       const assistantMessage = { role: 'assistant', content: data.response };
       setMessages(prev => isNewChat ? [assistantMessage] : [...prev, assistantMessage]);
       setAudioSrc(`data:audio/mp3;base64,${data.audio}`);
-      if (isPlaying) {
-        audioRef.current.play();
-      }
     } catch (error) {
       console.error('Error:', error);
       setMessages(prev => [...prev, { role: 'error', content: `Failed to get response. Error: ${error.message}` }]);
@@ -316,7 +313,7 @@ const App = () => {
               type="button"
               onClick={isRecording ? stopRecording : startRecording}
               className={`bg-[#07575b] text-[#c0dee5] p-3 rounded-lg transition-colors duration-200 hover:bg-[#07575b] focus:outline-none focus:ring-2 focus:ring-[#07575b] ${isRecording ? 'animate-pulse' : ''}`}
-              disabled={isLoading}
+              disabled={isLoading || isPlaying}
             >
               <Mic size={24} />
             </button>

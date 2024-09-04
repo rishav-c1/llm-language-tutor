@@ -244,8 +244,8 @@ async def speech_to_text(audio: UploadFile = File(...)):
         print("Configuring recognition...")
         config = speech_v2.RecognitionConfig(
             auto_decoding_config=speech_v2.AutoDetectDecodingConfig(),
-            language_codes=["en-US"],
-            model="long",
+            language_codes=["es-US", "en-US"],
+            model="latest_short",
         )
 
         print("Creating recognition request...")
