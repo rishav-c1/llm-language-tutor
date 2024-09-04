@@ -17,6 +17,7 @@ const App = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [audioChunks, setAudioChunks] = useState([]);
   const [recordingStatus, setRecordingStatus] = useState('');
+  const [processingStatus, setProcessingStatus] = useState('');
   const [error, setError] = useState(null);
   const mediaRecorderRef = useRef(null);
   const messagesEndRef = useRef(null);
@@ -49,6 +50,7 @@ const App = () => {
       setInput('');
     }
     setIsLoading(true);
+    setProcessingStatus('Processing request...');
 
     try {
       const response = await fetch(`${API_URL}/api/learn`, {
@@ -69,11 +71,15 @@ const App = () => {
       const assistantMessage = { role: 'assistant', content: data.response };
       setMessages(prev => isNewChat ? [assistantMessage] : [...prev, assistantMessage]);
       setAudioSrc(`data:audio/mp3;base64,${data.audio}`);
+      if (isPlaying) {
+        audioRef.current.play();
+      }
     } catch (error) {
       console.error('Error:', error);
       setMessages(prev => [...prev, { role: 'error', content: `Failed to get response. Error: ${error.message}` }]);
     } finally {
       setIsLoading(false);
+      setProcessingStatus('');
     }
   };
 
@@ -322,6 +328,9 @@ const App = () => {
               <Send size={24} />
             </button>
           </div>
+          {processingStatus && (
+            <div className="text-center text-[#c0dee5] mt-2">{processingStatus}</div>
+          )}
           {recordingStatus && (
             <div className="text-center text-[#c0dee5] mt-2">{recordingStatus}</div>
           )}

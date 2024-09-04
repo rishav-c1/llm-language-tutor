@@ -1,12 +1,10 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from google.cloud import speech_v2
 from google.oauth2 import service_account
-from google.api_core import exceptions as google_exceptions
 import anthropic
-import asyncio
 import io
 import base64
 from gtts import gTTS
@@ -16,13 +14,16 @@ import re
 from num2words import num2words
 import os
 from dotenv import load_dotenv
-import requests
-import tempfile
-import time
-from concurrent.futures import ThreadPoolExecutor
+from fastapi.responses import StreamingResponse
+import asyncio
+from collections import defaultdict
+
+
+message_count = defaultdict(int)
 
 load_dotenv()
 app = FastAPI()
+cache = {}
 
 
 PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT", "sunny-atrium-388515")
@@ -49,39 +50,48 @@ class FeedbackRequest(BaseModel):
     context: str
 
 def tts(text, lang):
+    if not text.strip():
+        return None  # Return None for empty strings
     return gTTS(text=text, lang=lang, tld="com")
 
 def detect_language(text):
+    if not text.strip():
+        return 'en'  # Default to English for empty strings
     try:
         return detect(text)
     except LangDetectException:
-        return None
+        return 'en'  # Default to English if detection fails
 
 def preprocess_text(text):
-    text = text.replace("/", " out of ")
-    text = re.sub(r'\b\d+\b', lambda m: num2words(int(m.group())), text)
-    return text
-
-def split_into_chunks(words, chunk_size=20):
-    return [words[i:i + chunk_size] for i in range(0, len(words), chunk_size)]
+    # Add spaces around punctuation marks
+    text = re.sub(r'([¿¡?!])', r' \1 ', text)
+    text = re.sub(r'(\d+/\d+)(\s)', r'\1,\2', text)
+    
+    # Split text into sentences and filter out empty ones
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+    
+    processed_sentences = []
+    for sentence in sentences:
+        lang = detect_language(sentence)
+        processed_sentences.append((sentence, lang))
+    
+    return processed_sentences
 
 def generate_multilingual_audio(text):
     segments = []
-    preprocessed_text = preprocess_text(text)
-    words = re.findall(r"\S+\s*", preprocessed_text)
-    chunks = split_into_chunks(words)
+    preprocessed_sentences = preprocess_text(text)
 
-    for chunk in chunks:
-        chunk_text = ''.join(chunk).strip()
-        curr_lang = detect_language(chunk_text)
-        if curr_lang not in ['en', 'es']:
-            curr_lang = 'en'
-        audio = tts(chunk_text, curr_lang)
-        with io.BytesIO() as f:
-            audio.write_to_fp(f)
-            f.seek(0)
-            segment = AudioSegment.from_mp3(f)
-            segments.append(segment)
+    for sentence, lang in preprocessed_sentences:
+        audio = tts(sentence, lang)
+        if audio:  # Only process if audio is not None
+            with io.BytesIO() as f:
+                audio.write_to_fp(f)
+                f.seek(0)
+                segment = AudioSegment.from_mp3(f)
+                segments.append(segment)
+
+    if not segments:
+        return None  # Return None if no audio was generated
 
     combined = sum(segments)
     buffer = io.BytesIO()
@@ -90,7 +100,17 @@ def generate_multilingual_audio(text):
 
 @app.post("/api/learn")
 async def learn(prompt_request: PromptRequest):
+    global message_count
+    
+    # Increment message count for this session
+    session_id = 123  # TODO: to add this to PromptRequest model
+    message_count[session_id] += 1
+
     context = "" if prompt_request.is_new_chat else prompt_request.context
+    
+    cached_summary = cache.get(f'summary_{session_id}', '')
+    if cached_summary and not prompt_request.is_new_chat:
+        context = f"Previous lesson summary:\n{cached_summary}\n\nContinuation:\n{context}"
     
     messages = [
         {
@@ -106,27 +126,49 @@ async def learn(prompt_request: PromptRequest):
 
     response = client.messages.create(
         model="claude-3-5-sonnet-20240620",
-        max_tokens=100,
-        temperature=0.01,
-        system="You are a Spanish teacher. Teach me 20 basic Spanish words through conversation. Score my responses (1-5). Use format: Español sentence (English translation); Begin simple.",
+        max_tokens=150,
+        temperature=0.1,
+        system="""
+        You are a helpful Spanish teacher. Teach basic Spanish words through conversation and keep your messages short, simple and cohesive and at times test the user on learnt words.
+        Score the responses (1-5) honestly with good reasoning. Use format: English instruction with the Spanish phrase. Begin simple.""",
         messages=messages
     )
 
-    text_response = response.content[0].text
+
+    text_response = clean_response(response.content[0].text)
     audio = generate_multilingual_audio(text_response)
     audio_b64 = base64.b64encode(audio).decode('utf-8')
+    
+    if message_count[session_id] % 10 == 0:
+        print(f"Caching conversation summary for session {session_id}")
+        await cache_conversation_summary(session_id, context + "\n" + text_response)
 
     return JSONResponse(content={"response": text_response, "audio": audio_b64})
 
-@app.post("/api/feedback")
-async def feedback(feedback_request: FeedbackRequest):
+def clean_response(text_response):
+    text_response = text_response.rstrip()
+    
+    if not text_response:
+        return text_response
+    valid_endings = set('.!?:;"\')]')
+
+    if text_response[-1] not in valid_endings:
+        last_newline = text_response.rfind('\n')
+        if last_newline != -1:
+            text_response = text_response[:last_newline]
+        else:
+            text_response = ""
+
+    return text_response
+
+async def cache_conversation_summary(session_id: str, context: str):
     messages = [
         {
             "role": "user",
             "content": [
                 {
                     "type": "text",
-                    "text": f"Here's the context of a Spanish learning conversation:\n\n{feedback_request.context}\n\nBased on this conversation, please provide:\n1. Español words learned\n2. Overall evaluation score (1-5) of the learner's progress\n3. Very short constructive feedback and suggestions for improvement"
+                    "text": f"Please provide a summary of this Spanish learning conversation:\n\n{context}"
                 }
             ]
         }
@@ -134,13 +176,63 @@ async def feedback(feedback_request: FeedbackRequest):
 
     response = client.messages.create(
         model="claude-3-5-sonnet-20240620",
-        max_tokens=150,
+        max_tokens=200,
         temperature=0,
-        system="You are an AI language learning assistant tasked with providing feedback and evaluation for Spanish learners.",
+        system="You are an AI language learning assistant tasked with summarizing Spanish learning conversations.",
         messages=messages
     )
 
-    return JSONResponse(content={"feedback": response.content[0].text})
+    summary = response.content[0].text
+    cache[f'summary_{session_id}'] = summary
+
+@app.post("/api/feedback")
+async def feedback(feedback_request: FeedbackRequest):
+    feedback_prompt = """
+    As an AI language learning assistant, analyze the following Spanish learning conversation and provide a comprehensive lesson summary. Include:
+
+    1. Spanish words and phrases learned (list up to 10)
+    2. Topics covered
+    3. Grammar points discussed
+    4. Exercises or activities completed
+    5. Areas for improvement
+    6. Overall evaluation score (1-5) of the learner's progress
+    7. Constructive feedback
+    8. Suggested next steps for the learner
+
+    Present the summary in a clear, structured format.
+
+    Conversation context:
+    {context}
+
+    Lesson Summary:
+    """
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": feedback_prompt.format(context=feedback_request.context)
+                }
+            ]
+        }
+    ]
+
+    response = client.messages.create(
+        model="claude-3-5-sonnet-20240620",
+        max_tokens=500,
+        temperature=0,
+        system="You are an AI language learning assistant tasked with providing comprehensive feedback and evaluation for Spanish learners.",
+        messages=messages
+    )
+
+    lesson_summary = response.content[0].text
+
+    # Cache the lesson summary for use in the next /learn call
+    cache['latest_summary'] = lesson_summary
+
+    return JSONResponse(content={"feedback": lesson_summary})
 
 @app.post("/api/speech-to-text")
 async def speech_to_text(audio: UploadFile = File(...)):
