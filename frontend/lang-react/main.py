@@ -14,18 +14,12 @@ import re
 from num2words import num2words
 import os
 from dotenv import load_dotenv
-from fastapi.responses import StreamingResponse
-import asyncio
-from collections import defaultdict
 
 
-message_count = defaultdict(int)
-
+message_count = 0
 load_dotenv()
 app = FastAPI()
-cache = {}
-
-
+cache = []
 PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT", "sunny-atrium-388515")
 credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 credentials = service_account.Credentials.from_service_account_file(credentials_path)
@@ -52,28 +46,36 @@ class FeedbackRequest(BaseModel):
 def tts(text, lang):
     if not text.strip():
         return None  # Return None for empty strings
+    if lang not in ["es", "en"]:
+        lang = "en"  # Default to English if language is not supported
     return gTTS(text=text, lang=lang, tld="com")
 
 def detect_language(text):
     if not text.strip():
-        return 'en'  # Default to English for empty strings
+        return 'en'  
     try:
         return detect(text)
     except LangDetectException:
-        return 'en'  # Default to English if detection fails
+        return 'en'  
 
 def preprocess_text(text):
-    # Add spaces around punctuation marks
-    text = re.sub(r'([¿¡?!])', r' \1 ', text)
-    text = re.sub(r'(\d+/\d+)(\s)', r'\1,\2', text)
+    # Replace X/Y with "X out of Y"
+    text = re.sub(r'(\d+)/(\d+)', lambda m: f"{m.group(1)} out of {m.group(2)}", text)
     
-    # Split text into sentences and filter out empty ones
-    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+    # Convert standalone numbers to words
+    def replace_number(match):
+        num = int(match.group())
+        return num2words(num, lang='es') if detect_language(match.group()) == 'es' else num2words(num)
+
+    text = re.sub(r'\b\d+\b', replace_number, text)
+    
+    # Split text into sentences
+    sentences = re.split(r'(?<=[.!?])\s+', text)
     
     processed_sentences = []
     for sentence in sentences:
         lang = detect_language(sentence)
-        processed_sentences.append((sentence, lang))
+        processed_sentences.append((sentence.strip(), lang))
     
     return processed_sentences
 
@@ -101,15 +103,17 @@ def generate_multilingual_audio(text):
 @app.post("/api/learn")
 async def learn(prompt_request: PromptRequest):
     global message_count
+    global cache
     
     # Increment message count for this session
-    session_id = 123  # TODO: to add this to PromptRequest model
-    message_count[session_id] += 1
+    message_count += 1
+
+    if prompt_request.is_new_chat:
+        cache = []
 
     context = "" if prompt_request.is_new_chat else prompt_request.context
-    
-    cached_summary = cache.get(f'summary_{session_id}', '')
-    if cached_summary and not prompt_request.is_new_chat:
+    if cache and not prompt_request.is_new_chat:
+        cached_summary = cache.pop(0)
         context = f"Previous lesson summary:\n{cached_summary}\n\nContinuation:\n{context}"
     
     messages = [
@@ -129,8 +133,7 @@ async def learn(prompt_request: PromptRequest):
         max_tokens=150,
         temperature=0.1,
         system="""
-        You are a helpful Spanish teacher. Teach basic Spanish words through conversation and keep your messages short, simple and cohesive and at times test the user on learnt words.
-        Score the responses (1-5) honestly with good reasoning. Use format: English instruction with the Spanish phrase. Begin simple.""",
+        You are a helpful Spanish teacher. Teach basics conversationally and score user (1-5) with reasoning. Keep responses short, simple, cohesive. Format: English instruction with Spanish phrase. Occasionally test learned words. Adapt difficulty. Start simple. Maintain conversation flow. Support bilingual content.""",
         messages=messages
     )
 
@@ -139,9 +142,9 @@ async def learn(prompt_request: PromptRequest):
     audio = generate_multilingual_audio(text_response)
     audio_b64 = base64.b64encode(audio).decode('utf-8')
     
-    if message_count[session_id] % 10 == 0:
-        print(f"Caching conversation summary for session {session_id}")
-        await cache_conversation_summary(session_id, context + "\n" + text_response)
+    if message_count % 10 == 0:
+        print(f"Caching conversation summary for session")
+        await cache_conversation_summary(context + "\n" + text_response)
 
     return JSONResponse(content={"response": text_response, "audio": audio_b64})
 
@@ -161,7 +164,7 @@ def clean_response(text_response):
 
     return text_response
 
-async def cache_conversation_summary(session_id: str, context: str):
+async def cache_conversation_summary(context: str):
     messages = [
         {
             "role": "user",
@@ -178,12 +181,12 @@ async def cache_conversation_summary(session_id: str, context: str):
         model="claude-3-5-sonnet-20240620",
         max_tokens=200,
         temperature=0,
-        system="You are an AI language learning assistant tasked with summarizing Spanish learning conversations.",
+        system="You are an AI language learning assistant tasked with summarizing Spanish learning conversations concisely while preserving as much information as possible.",
         messages=messages
     )
 
     summary = response.content[0].text
-    cache[f'summary_{session_id}'] = summary
+    cache.insert(0, summary)
 
 @app.post("/api/feedback")
 async def feedback(feedback_request: FeedbackRequest):
@@ -230,7 +233,7 @@ async def feedback(feedback_request: FeedbackRequest):
     lesson_summary = response.content[0].text
 
     # Cache the lesson summary for use in the next /learn call
-    cache['latest_summary'] = lesson_summary
+    cache.insert(0, lesson_summary)
 
     return JSONResponse(content={"feedback": lesson_summary})
 
@@ -271,6 +274,7 @@ async def speech_to_text(audio: UploadFile = File(...)):
     except Exception as e:
         print(f"Error in speech_to_text: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Speech-to-text failed: {str(e)}")
+    
 if __name__ == "__main__":
     import uvicorn
     logger.info("Starting the server...")
