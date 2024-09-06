@@ -12,19 +12,17 @@
 
 1. Clone the repository:
    ```
-   git clone https://github.com/rishav-c1/lang-spanish-learning.git
+   git clone https://github.com/rishav-c1/llm-language-tutor.git
    cd lang-spanish-learning
    ```
 
 2. Set up the backend:
    ```
-   cd backend
-   pip install -r requirements.txt
+   pip install -r python_requirements.txt
    ```
 
 3. Set up the frontend:
    ```
-   cd ../frontend
    npm install
    ```
 
